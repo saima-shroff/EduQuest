@@ -1,11 +1,14 @@
 import os
 import click
+from email_validator import EmailNotValidError, validate_email
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_security import hash_password
 from flask_security.decorators import default_unauthn_handler
+from sqlalchemy import func, inspect, text
 
 from .extensions import db, security as security_ext
+from .models import Role, User
 from .security import user_datastore
 
 
@@ -42,29 +45,68 @@ def create_app(test_config=None):
         return jsonify(error=error.description), error.code
 
     @app.cli.command("init-db")
-    def init_db():
-        """Create tables and the two supported roles."""
+    def init_db_command():
+        """Create tables, application roles, and the first Admin account."""
         db.create_all()
-        for role_name in ("Instructor", "Student"):
+        if "instructor_approved" not in {
+            column["name"] for column in inspect(db.engine).get_columns("user")
+        }:
+            with db.engine.begin() as connection:
+                connection.execute(text(
+                    'ALTER TABLE "user" ADD COLUMN instructor_approved '
+                    "BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
+                connection.execute(text(
+                    'UPDATE "user" SET instructor_approved = TRUE '
+                    'WHERE id IN ('
+                    'SELECT roles_users.user_id FROM roles_users '
+                    'JOIN role ON role.id = roles_users.role_id '
+                    "WHERE role.name = 'Instructor'"
+                    ')'
+                ))
+            db.session.expire_all()
+
+        for role_name in ("Admin", "Instructor", "Student"):
             if not user_datastore.find_role(role_name):
                 user_datastore.create_role(name=role_name)
         db.session.commit()
-        click.echo("Database initialized.")
 
-    @app.cli.command("promote-instructor")
-    @click.argument("email")
-    def promote_instructor(email):
-        """Grant Instructor privileges to an existing account."""
-        user = user_datastore.find_user(email=email.strip().lower())
-        role = user_datastore.find_role("Instructor")
-        if not user:
-            raise click.ClickException("No account exists for that email.")
-        if not role:
-            raise click.ClickException("Run 'flask init-db' first.")
-        if not user.has_role("Instructor"):
-            user_datastore.add_role_to_user(user, role)
-            db.session.commit()
-        click.echo(f"Instructor role granted to {user.email}.")
+        for user in db.session.scalars(db.select(User)).all():
+            if not user.password.startswith("$"):
+                user.password = hash_password(user.password)
+
+        admin_count = db.session.scalar(
+            db.select(func.count(User.id))
+            .join(User.roles)
+            .where(Role.name == "Admin")
+        )
+        if not admin_count:
+            admin_email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+            admin_password = os.environ.get("ADMIN_PASSWORD", "")
+            if not admin_email or len(admin_password) < 12:
+                raise click.ClickException(
+                    "No Admin account exists. Set ADMIN_EMAIL and ADMIN_PASSWORD "
+                    "(at least 12 characters), then run 'flask init-db' again."
+                )
+            try:
+                admin_email = validate_email(
+                    admin_email, check_deliverability=False
+                ).normalized.lower()
+            except EmailNotValidError as error:
+                raise click.ClickException(f"ADMIN_EMAIL is invalid: {error}") from error
+            if user_datastore.find_user(email=admin_email):
+                raise click.ClickException(
+                    "ADMIN_EMAIL already belongs to a non-admin account."
+                )
+            user_datastore.create_user(
+                email=admin_email,
+                name="EduQuest Admin",
+                password=hash_password(admin_password),
+                roles=[user_datastore.find_role("Admin")],
+                instructor_approved=True,
+            )
+        db.session.commit()
+        click.echo("Database initialized. Admin account is ready.")
 
     @app.shell_context_processor
     def shell_context():

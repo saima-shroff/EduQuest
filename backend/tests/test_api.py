@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -24,6 +25,7 @@ class EduQuestApiTests(unittest.TestCase):
         })
         with self.app.app_context():
             db.create_all()
+            user_datastore.create_role(name="Admin")
             user_datastore.create_role(name="Student")
             user_datastore.create_role(name="Instructor")
             self.student = user_datastore.create_user(
@@ -33,10 +35,12 @@ class EduQuestApiTests(unittest.TestCase):
             self.instructor = user_datastore.create_user(
                 email="teacher@example.com", name="Teacher", password="test-password",
                 roles=[user_datastore.find_role("Instructor")],
+                instructor_approved=True,
             )
             self.other_instructor = user_datastore.create_user(
                 email="other@example.com", name="Other", password="test-password",
                 roles=[user_datastore.find_role("Instructor")],
+                instructor_approved=True,
             )
             db.session.commit()
         self.client = self.app.test_client()
@@ -49,9 +53,9 @@ class EduQuestApiTests(unittest.TestCase):
             db.session.remove()
             db.drop_all()
 
-    def login(self, email):
+    def login(self, email, password="test-password"):
         response = self.client.post("/api/auth/login", json={
-            "email": email, "password": "test-password",
+            "email": email, "password": password,
         })
         self.assertEqual(response.status_code, 200, response.get_json())
         return {"Authentication-Token": response.get_json()["auth_token"]}
@@ -101,11 +105,124 @@ class EduQuestApiTests(unittest.TestCase):
     def test_registration_cannot_assign_instructor_role(self):
         response = self.client.post("/api/auth/register", json={
             "name": "New person", "email": "new@example.com",
-            "password": "password-123", "role": "Instructor",
+            "password": "password-123", "role": "Admin",
         })
         self.assertEqual(response.status_code, 400)
         with self.app.app_context():
             self.assertIsNone(user_datastore.find_user(email="new@example.com"))
+
+    def test_student_registration_logs_in_and_instructor_waits_for_approval(self):
+        student = self.client.post("/api/auth/register", json={
+            "name": "New student",
+            "email": "new.student@example.com",
+            "password": "password-123",
+            "role": "Student",
+        })
+        self.assertEqual(student.status_code, 201, student.get_json())
+        self.assertTrue(student.get_json()["user"]["instructor_approved"])
+        with self.app.app_context():
+            saved_student = user_datastore.find_user(email="new.student@example.com")
+            self.assertTrue(saved_student.password.startswith("$"))
+
+        instructor = self.client.post("/api/auth/register", json={
+            "name": "New instructor",
+            "email": "new.instructor@example.com",
+            "password": "password-123",
+            "role": "Instructor",
+        })
+        self.assertEqual(instructor.status_code, 201, instructor.get_json())
+        self.assertFalse(instructor.get_json()["user"]["instructor_approved"])
+        login = self.client.post("/api/auth/login", json={
+            "email": "new.instructor@example.com",
+            "password": "password-123",
+        })
+        self.assertEqual(login.status_code, 403)
+        self.assertIn("awaiting admin approval", login.get_json()["error"])
+
+    def test_admin_approves_instructor_and_views_application_statistics(self):
+        with self.app.app_context():
+            admin_role = user_datastore.find_role("Admin")
+            admin = user_datastore.create_user(
+                email="admin@example.com",
+                name="EduQuest Admin",
+                password="test-password",
+                roles=[admin_role],
+            )
+            db.session.commit()
+            admin_id = admin.id
+        admin_headers = self.login("admin@example.com")
+        _, _, quiz = self.create_quiz()
+        started_attempt = self.client.post(
+            f"/api/quizzes/{quiz['id']}/start", headers=self.student_headers,
+        )
+        self.assertEqual(started_attempt.status_code, 201, started_attempt.get_json())
+
+        registered = self.client.post("/api/auth/register", json={
+            "name": "Waiting instructor",
+            "email": "waiting@example.com",
+            "password": "password-123",
+            "role": "Instructor",
+        })
+        instructor_id = registered.get_json()["user"]["id"]
+        denied = self.client.post(
+            f"/api/admin/instructors/{instructor_id}/approve",
+            headers=self.instructor_headers,
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        dashboard = self.client.get("/api/admin/dashboard", headers=admin_headers)
+        self.assertEqual(dashboard.status_code, 200, dashboard.get_json())
+        stats = dashboard.get_json()["stats"]
+        self.assertEqual(stats["students"], 1)
+        self.assertEqual(stats["instructors"], 2)
+        self.assertEqual(stats["pending_instructors"], 1)
+        self.assertEqual(stats["active_quizzes"], 1)
+        self.assertEqual(stats["total_attempts"], 1)
+        self.assertEqual(dashboard.get_json()["quizzes"][0]["instructor_name"], "Teacher")
+        self.assertEqual(dashboard.get_json()["recent_attempts"][0]["student_email"], "student@example.com")
+
+        approved = self.client.post(
+            f"/api/admin/instructors/{instructor_id}/approve",
+            headers=admin_headers,
+        )
+        self.assertEqual(approved.status_code, 200, approved.get_json())
+        self.assertTrue(approved.get_json()["instructor"]["instructor_approved"])
+        instructor_token = self.login("waiting@example.com", "password-123")
+        courses = self.client.get("/api/courses", headers=instructor_token)
+        self.assertEqual(courses.status_code, 200)
+        self.assertNotEqual(admin_id, instructor_id)
+
+    def test_init_db_creates_first_admin(self):
+        runner = self.app.test_cli_runner()
+        with patch.dict(os.environ, {
+            "ADMIN_EMAIL": "first.admin@example.com",
+            "ADMIN_PASSWORD": "first-admin-password",
+        }):
+            result = runner.invoke(args=["init-db"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        with self.app.app_context():
+            admin = user_datastore.find_user(email="first.admin@example.com")
+            self.assertIsNotNone(admin)
+            self.assertTrue(admin.has_role("Admin"))
+            self.assertTrue(admin.password.startswith("$"))
+            migrated_student = user_datastore.find_user(email="student@example.com")
+            self.assertTrue(migrated_student.password.startswith("$"))
+        self.login("student@example.com")
+
+    def test_init_db_migrates_existing_instructor_approval_state(self):
+        with self.app.app_context():
+            db.session.execute(db.text('ALTER TABLE "user" DROP COLUMN instructor_approved'))
+            db.session.commit()
+
+        with patch.dict(os.environ, {
+            "ADMIN_EMAIL": "migrated.admin@example.com",
+            "ADMIN_PASSWORD": "migrated-admin-password",
+        }):
+            result = self.app.test_cli_runner().invoke(args=["init-db"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        with self.app.app_context():
+            migrated = user_datastore.find_user(email="teacher@example.com")
+            self.assertTrue(migrated.instructor_approved)
 
     def test_api_requires_token_and_returns_json_error(self):
         response = self.client.get("/api/courses")

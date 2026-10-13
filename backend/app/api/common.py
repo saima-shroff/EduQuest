@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from functools import wraps
 
 from flask import abort, request
 from flask_security import auth_required, current_user
@@ -8,7 +9,14 @@ from ..models import Chapter, Course, Quiz
 
 
 def token_required(view):
-    return auth_required("token")(view)
+    @wraps(view)
+    @auth_required("token")
+    def wrapped(*args, **kwargs):
+        if current_user.has_role("Instructor") and not current_user.instructor_approved:
+            abort(403, description="Your instructor account is awaiting admin approval.")
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 def role_required(role_name):

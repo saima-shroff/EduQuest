@@ -24,6 +24,7 @@ class User(db.Model, UserMixin):
     name = db.Column(db.String(120), nullable=False)
     password = db.Column(db.String(255), nullable=False)
     active = db.Column(db.Boolean(), nullable=False, default=True)
+    instructor_approved = db.Column(db.Boolean(), nullable=False, default=False)
     fs_uniquifier = db.Column(db.String(64), unique=True, nullable=False)
     confirmed_at = db.Column(db.DateTime())
     roles = db.relationship("Role", secondary=roles_users, backref="users")
