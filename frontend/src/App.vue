@@ -21,6 +21,7 @@ function signOut() {
       </RouterLink>
       <nav v-if="user" class="nav-links">
         <RouterLink to="/">Dashboard</RouterLink>
+        <RouterLink v-if="user?.roles?.includes('Admin')" to="/admin">Admin overview</RouterLink>
         <RouterLink v-if="user?.roles?.includes('Instructor')" to="/manage">Manage content</RouterLink>
         <RouterLink v-if="user?.roles?.includes('Student')" to="/history">My results</RouterLink>
       </nav>

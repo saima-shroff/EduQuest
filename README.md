@@ -2,9 +2,9 @@
 
 ## Application overview and features
 
-EduQuest is a quiz and assessment website I built to help students practice and instructors create learning materials. Courses can be organized into chapters, and each chapter can have timed quizzes with multiple-choice or short-answer questions.
+EduQuest is a quiz and assessment website I built to help students practice and instructors create learning materials. Courses can be organized into chapters, and each chapter can have timed quizzes with multiple-choice or short-answer questions. Students and instructors can register, but new instructor accounts need an Admin's approval before they can use the application.
 
-Students can browse quizzes, save their answers while they work, submit their attempts, and check their scores and past results. Instructors can create and manage their own courses, chapters, quizzes, and questions. Quiz answers are graded automatically. Short answers are matched with accepted answers without considering differences in letter case or extra spaces.
+Students can browse quizzes, save their answers while they work, submit their attempts, and check their scores and past results. Approved instructors can create and manage their own courses, chapters, quizzes, and questions. Admins can approve instructor requests and view user, quiz, and attempt statistics. Quiz answers are graded automatically. Short answers are matched with accepted answers without considering differences in letter case or extra spaces.
 
 The project uses Flask, SQLAlchemy, and Flask-Security-Too for the backend, and Vue 3, Vue Router, Axios, and Vite for the frontend. SQLite is used as the development database.
 
@@ -21,17 +21,18 @@ cd backend
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+```
+
+The first database setup creates the Admin account from environment variables. Set them before initializing the database:
+
+```powershell
+$env:ADMIN_EMAIL = "admin@example.com"
+$env:ADMIN_PASSWORD = "use-a-unique-password-at-least-12-characters"
 flask --app run.py init-db
 flask --app run.py run
 ```
 
-The backend runs at `http://127.0.0.1:5000`. The database is created at `backend/instance/eduquest.db`.
-
-Anyone can register as a Student. An existing account can be given Instructor access by a trusted operator:
-
-```powershell
-flask --app run.py promote-instructor instructor@example.com
-```
+The backend runs at `http://127.0.0.1:5000`, and the database is created at `backend/instance/eduquest.db`. The Admin can sign in using those credentials. After initialization, these variables are only used if the database has no Admin account.
 
 ### 2. Set up the frontend
 
@@ -57,9 +58,18 @@ Authentication-Token: <auth_token>
 
 | Method | Endpoint | Who can use it | What it does |
 |---|---|---|---|
-| `POST` | `/api/auth/register` | Anyone | Register a Student with `{"name":"Sam","email":"sam@example.com","password":"at-least-8-chars"}` |
+| `POST` | `/api/auth/register` | Anyone | Register as a Student or Instructor with `{"name":"Sam","email":"sam@example.com","password":"at-least-8-chars","role":"Student"}`; new instructors must wait for Admin approval |
 | `POST` | `/api/auth/login` | Anyone | Log in with email and password; returns the authentication token and user profile |
 | `GET` | `/api/auth/me` | Signed-in users | Get the current user's profile and roles |
+
+### Admin
+
+| Method | Endpoint | Who can use it | What it does |
+|---|---|---|---|
+| `GET` | `/api/admin/dashboard` | Admins | Get registration, instructor approval, course, quiz, score, and attempt statistics, plus recent quizzes and attempts |
+| `POST` | `/api/admin/instructors/<user_id>/approve` | Admins | Approve a pending Instructor account |
+
+The first account can be bootstrapped with `ADMIN_EMAIL` and `ADMIN_PASSWORD` when running `flask --app run.py init-db`. Admin accounts cannot be created through public registration.
 
 ### Courses and chapters
 
